@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.secrets/
+.env
+.env.*
+google*.json
+*token*.json
+*credentials*.json
+chrome-profile*/
+downloads/
+diagnostics/
+*.log
+*.xlsx
+*.xls
