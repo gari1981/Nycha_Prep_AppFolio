@@ -3,7 +3,7 @@ import logging
 import re
 import time
 
-SMS_SPREADSHEET_ID = '1_E8TYxNzWjQljkZwe5_RIn_pGeHqBDyLt7bQWn3RXYU'
+SMS_SPREADSHEET_ID = '1zQO5FLRFf2H8RwC3vzPFBkDVg6Px4r0GNvCjqLeZSls'
 
 
 def first_six_digits(value):
@@ -27,12 +27,12 @@ def latest_sms(service):
         start = max(2, end - 199)
         rows = service.spreadsheets().values().get(
             spreadsheetId=SMS_SPREADSHEET_ID,
-            range=f"'SMS'!A{start}:Z{end}", valueRenderOption='FORMATTED_VALUE',
+            range=f"'SMS'!A{start}:B{end}", valueRenderOption='FORMATTED_VALUE',
         ).execute(num_retries=0).get('values', [])
         for offset in range(len(rows) - 1, -1, -1):
             row = rows[offset]
             if any(str(value).strip() for value in row):
-                return start + offset, tuple(str(v) for v in row), str(row[2]) if len(row) > 2 else ''
+                return start + offset, tuple(str(v) for v in row), str(row[1]) if len(row) > 1 else ''
         end = start - 1
     return 0, (), ''
 
@@ -85,7 +85,7 @@ class SmsVerification:
                 for handler in logging.getLogger().handlers:
                     if hasattr(handler, 'secrets'):
                         handler.secrets.append(self.code)
-                logging.info('SMS RECEIVED Six digits read from column C of the latest new row; value hidden.')
+                logging.info('SMS RECEIVED Six digits read from column B of the latest new row; value hidden.')
         if self.code is None:
             return
         code_input = visible(page.get_by_role('textbox', name=re.compile(r'^(?:verification code|security code|authentication code|code|enter (?:the )?(?:verification )?code)[: *]*$', re.I)))
