@@ -4,14 +4,15 @@ import logging
 import os
 from pathlib import Path
 import tempfile
+import sys
 
 import nycha_prep_appfolio_worker as worker
+from sheets_run_log import SheetsRunLog
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def run(run_log):
     required = ("GOOGLE_TOKEN_JSON", "NYCHA_PREP_SPREADSHEET_ID",
-                "APPFOLIO_LOGIN_SPREADSHEET_ID", "APPFOLIO_URL")
+                "APPFOLIO_LOGIN_SPREADSHEET_ID", "APPFOLIO_URL", "LOG_SPREADSHEET_ID")
     missing = [name for name in required if not os.environ.get(name, "").strip()]
     if missing:
         raise RuntimeError("Missing GitHub Secrets/Variables: " + ", ".join(missing))
@@ -24,6 +25,8 @@ def main():
         raise RuntimeError("GOOGLE_TOKEN_JSON must be an authorized-user token with a refresh token, not an OAuth client JSON.")
     if token["token_uri"] != "https://oauth2.googleapis.com/token":
         raise RuntimeError("Unexpected Google token endpoint.")
+    run_log.secrets.extend(str(token[k]) for k in
+                           ('token', 'refresh_token', 'client_secret') if token.get(k))
     with tempfile.TemporaryDirectory(prefix="nycha-appfolio-") as directory:
         folder = Path(directory)
         token_path = folder / "google_token.json"
@@ -40,8 +43,12 @@ def main():
         args.browser_channel = "chromium"
         worker.appfolio_base.require_dependencies()
         service = worker.appfolio_base.build_sheets_service(args)
+        # Require log access before downloading or changing any report tabs.
+        run_log.bind(service)
+        logging.info("SUCCESS Connected to NYCHA PREP APPFOLIO progress log.")
         worker.validate_spreadsheet(service, args)
         worker.load_appfolio_login(service, args)
+        run_log.secrets.extend([args.appfolio_email, args.appfolio_password])
         if args.validate_only:
             logging.info("SUCCESS Google access, destination tabs and Login values validated. AppFolio login not tested.")
             return
@@ -51,5 +58,32 @@ def main():
         logging.info("SUCCESS NYCHA PREP AppFolio refresh completed.")
 
 
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    with tempfile.TemporaryDirectory(prefix='nycha-run-log-') as log_directory:
+        run_log = SheetsRunLog(log_directory)
+        logging.getLogger().addHandler(run_log)
+        try:
+            logging.info("STARTED GitHub Actions run %s; mode=%s", run_log.run_id,
+                         'validate' if '--validate-only' in sys.argv else 'refresh')
+            run(run_log)
+            return 0
+        except KeyboardInterrupt:
+            logging.warning("STOPPED Run interrupted.")
+            return 130
+        except Exception as exc:
+            # Keep authentication URLs and known credentials out of public logs.
+            logging.error("FAILED %s: %s", type(exc).__name__, run_log.redact(str(exc)))
+            return 1
+        finally:
+            run_log.finish()
+            if run_log.pending:
+                # Hosted runners are disposable: emit sanitized fallback rows.
+                for row in run_log.pending:
+                    print('UNSENT SHEETS LOG: ' + json.dumps(row, ensure_ascii=False), flush=True)
+            logging.getLogger().removeHandler(run_log)
+            run_log.close()
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

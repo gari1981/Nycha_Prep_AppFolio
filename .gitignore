@@ -13,3 +13,6 @@ diagnostics/
 *.log
 *.xlsx
 *.xls
+
+logs/
+*.jsonl

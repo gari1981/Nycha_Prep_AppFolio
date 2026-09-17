@@ -100,7 +100,7 @@ def quote_sheet_name(name: str) -> str:
     return "'" + name.replace("'", "''") + "'"
 
 def wait_for_appfolio_login(page, args: argparse.Namespace) -> None:
-    logging.info('STARTED Opening AppFolio.')
+    logging.info("STARTED Opening AppFolio.")
 
     def first_visible(*locators):
         for locator in locators:
@@ -117,45 +117,53 @@ def wait_for_appfolio_login(page, args: argparse.Namespace) -> None:
     def login_controls():
         """Resolve both the former and current AppFolio login markup."""
         try:
-            email_by_label = page.get_by_label('Email', exact=True)
+            email_by_label = page.get_by_label("Email", exact=True)
         except Exception:
             email_by_label = None
         try:
-            email_by_role = page.get_by_role('textbox', name='Email', exact=True)
+            email_by_role = page.get_by_role("textbox", name="Email", exact=True)
         except Exception:
             email_by_role = None
         try:
-            email_by_css = page.locator("input[type='email'], input[name='username'], input[name='email']")
+            email_by_css = page.locator(
+                "input[type='email'], input[name='username'], input[name='email']"
+            )
         except Exception:
             email_by_css = None
+
         try:
-            password_by_label = page.get_by_label('Password', exact=True)
+            password_by_label = page.get_by_label("Password", exact=True)
         except Exception:
             password_by_label = None
         try:
             password_by_css = page.locator("input[type='password']")
         except Exception:
             password_by_css = None
+
         try:
-            login_by_role = page.get_by_role('button', name=re.compile('^(?:log|sign)\\s*in$', re.I))
+            login_by_role = page.get_by_role(
+                "button", name=re.compile(r"^(?:log|sign)\s*in$", re.I)
+            )
         except Exception:
             login_by_role = None
         try:
             login_by_css = page.locator("button[type='submit'], input[type='submit']")
         except Exception:
             login_by_css = None
+
         try:
-            email_by_test_id = page.get_by_test_id('email-input')
+            email_by_test_id = page.get_by_test_id("email-input")
         except Exception:
             email_by_test_id = None
         try:
-            password_by_test_id = page.get_by_test_id('password-input')
+            password_by_test_id = page.get_by_test_id("password-input")
         except Exception:
             password_by_test_id = None
         try:
-            login_by_test_id = page.get_by_test_id('sign-in-button')
+            login_by_test_id = page.get_by_test_id("sign-in-button")
         except Exception:
             login_by_test_id = None
+
         email = first_visible(email_by_test_id, email_by_label, email_by_role, email_by_css)
         password = first_visible(password_by_test_id, password_by_label, password_by_css)
         submit = first_visible(login_by_test_id, login_by_role, login_by_css)
@@ -163,49 +171,51 @@ def wait_for_appfolio_login(page, args: argparse.Namespace) -> None:
 
     def logged_in() -> bool:
         try:
-            search = page.get_by_role('searchbox', name='Search')
+            search = page.get_by_role("searchbox", name="Search")
             return search.count() > 0 and search.first.is_visible()
         except Exception:
             return False
-    controls = None
-    for attempt, timeout_ms in enumerate((20000, 60000, 120000), start=1):
-        try:
-            page.goto(args.appfolio_url, wait_until='domcontentloaded', timeout=timeout_ms)
-        except Exception as exc:
-            logging.warning('RETRY AppFolio open attempt %s/3 did not finish in %s seconds: %s', attempt, timeout_ms // 1000, exc)
-        page.wait_for_timeout(2500 * attempt)
-        if logged_in():
-            logging.info('SUCCESS Existing AppFolio session is valid.')
-            return
-        controls = login_controls()
-        if controls:
-            break
-        if attempt < 3:
-            page.wait_for_timeout(2000 * attempt)
-    if args.appfolio_email and args.appfolio_password:
-        for login_attempt, wait_seconds in enumerate((30, 90), start=1):
+
+    from appfolio_sms import SmsVerification
+    service = getattr(args, 'sms_sheets_service', None)
+    sms = SmsVerification(service) if service is not None else None
+    manual = not args.headless and not args.non_interactive_login
+    page.goto(args.appfolio_url, wait_until="domcontentloaded", timeout=120000)
+    deadline = time.monotonic() + 240
+    submitted = False
+    logging.info("WAITING for AppFolio login; SMS verification automation is %s.",
+                 "enabled" if sms else "unavailable")
+    while not logged_in():
+        if page.is_closed():
+            raise RuntimeError("AppFolio login window was closed before login completed.")
+        if not manual and time.monotonic() >= deadline:
+            raise RuntimeError("AppFolio login did not complete within 240 seconds. Check credentials or verification requirements.")
+        if sms is not None:
+            try:
+                sms.poll(page)
+            except Exception as exc:
+                if browser_target_closed_error(exc):
+                    raise
+                if not manual:
+                    raise RuntimeError("Automatic SMS verification failed (" + type(exc).__name__ +
+                                       "). Check SMS sheet access, message arrival and verification form.") from None
+                logging.warning("SMS automation unavailable (%s); browser remains open for manual verification.", type(exc).__name__)
+                sms = None
+        if not submitted and args.appfolio_email and args.appfolio_password:
             controls = login_controls()
-            if not controls:
-                raise RuntimeError(f'AppFolio reached a login page, but its Email, Password, or Log in control could not be found (URL: {page.url}).')
-            email_input, password_input, login_button = controls
-            email_input.fill(args.appfolio_email)
-            password_input.fill(args.appfolio_password)
-            login_button.click(no_wait_after=True)
-            for _ in range(wait_seconds):
-                page.wait_for_timeout(1000)
-                if logged_in():
-                    logging.info('SUCCESS Automatic AppFolio login completed.')
-                    return
-            if login_attempt == 1:
-                logging.warning('RETRY AppFolio login did not finish quickly; waiting five seconds and submitting once more with a longer allowance.')
-                page.wait_for_timeout(5000)
-    if args.headless or args.non_interactive_login:
-        raise RuntimeError('Automatic AppFolio login did not reach the home-page Search box. Verify the Login tab credentials and whether AppFolio requested 2FA.')
-    print('Finish logging in to AppFolio in Chrome, including 2FA if requested.', flush=True)
-    input('Press Enter after the AppFolio home page is visible: ')
-    if not logged_in():
-        raise RuntimeError(f'AppFolio search box was not found after login (URL: {page.url}).')
-    logging.info('SUCCESS Manual AppFolio login completed.')
+            if controls:
+                email_input, password_input, login_button = controls
+                if (email_input.is_enabled() and password_input.is_enabled()
+                        and login_button.is_enabled()):
+                    email_input.fill(args.appfolio_email)
+                    password_input.fill(args.appfolio_password)
+                    login_button.click(no_wait_after=True)
+                    submitted = True
+                    logging.info("SUBMITTED AppFolio username/password; waiting for login or verification.")
+        page.wait_for_timeout(1000)
+    logging.info("SUCCESS AppFolio login completed.")
+
+
 
 def safe_filename(value: str) -> str:
     return re.sub('[^A-Za-z0-9._-]+', '_', value).strip('_')
@@ -376,33 +386,78 @@ def open_saved_report(page, report_name: str, diagnostics_dir: Path):
     logging.info('SUCCESS Report is ready: %s', report_name)
     return report_page
 
-def download_report(report_page, report_name: str, download_dir: Path, diagnostics_dir: Path) -> Path:
+def download_report(
+    report_page, report_name: str, download_dir: Path, diagnostics_dir: Path
+) -> Path:
+    # Log lifecycle events without logging URLs, credentials or report content.
+    context = report_page.context
+    browser = context.browser
+    report_page.on("close", lambda *_: logging.warning("EXPORT EVENT: report tab closed"))
+    report_page.on("crash", lambda *_: logging.error("EXPORT EVENT: report tab crashed"))
+    context.on("close", lambda *_: logging.warning("EXPORT EVENT: browser context closed"))
+    if browser is not None:
+        browser.on("disconnected", lambda *_: logging.warning("EXPORT EVENT: browser disconnected"))
     last_error = None
-    for attempt, control_timeout in enumerate((30000, 60000, 120000), start=1):
+    for attempt, control_timeout in enumerate((30_000, 60_000, 120_000), start=1):
         try:
-            export_excel = report_page.get_by_text('Export as Excel', exact=True)
+            export_excel = report_page.get_by_text("Export as Excel", exact=True)
             if first_visible(export_excel) is None:
-                report_page.get_by_role('button', name='Actions').click(no_wait_after=True)
+                report_page.get_by_role("button", name="Actions").click(
+                    no_wait_after=True
+                )
                 report_page.wait_for_timeout(750 * attempt)
-            export_excel.wait_for(state='visible', timeout=control_timeout)
-            with report_page.expect_download(timeout=max(120000, control_timeout)) as download_info:
+            export_excel.wait_for(state="visible", timeout=control_timeout)
+            with report_page.expect_download(
+                timeout=max(120_000, control_timeout)
+            ) as download_info:
                 export_excel.click(no_wait_after=True)
-            target = download_dir / f'{safe_filename(report_name)}_{datetime.now():%Y%m%d_%H%M%S}.xlsx'
-            download_info.value.save_as(target)
+            target = download_dir / (
+                f"{safe_filename(report_name)}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+            )
+            download = download_info.value
+            logging.info("STARTED Waiting for Excel download to complete: %s", report_name)
+            temporary_path = download.path()
+            if temporary_path is None:
+                raise RuntimeError("Excel download returned no local file.")
+            download.save_as(target)
             if not target.is_file() or target.stat().st_size == 0:
-                raise RuntimeError(f'Downloaded report is missing or empty: {target}')
+                raise RuntimeError(f"Downloaded report is missing or empty: {target}")
             if attempt > 1:
-                logging.info('SUCCESS Report download recovered on attempt %s/3: %s', attempt, report_name)
-            logging.info('SUCCESS Downloaded %s', target.name)
+                logging.info(
+                    "SUCCESS Report download recovered on attempt %s/3: %s",
+                    attempt,
+                    report_name,
+                )
+            logging.info("SUCCESS Downloaded %s", target.name)
             return target
         except Exception as exc:
             last_error = exc
+            page_closed = report_page.is_closed()
+            browser_connected = browser.is_connected() if browser is not None else None
+            logging.error(
+                "EXPORT FAILURE: stage=download report_tab_closed=%s browser_connected=%s error_type=%s",
+                page_closed, browser_connected, type(exc).__name__,
+            )
+            if browser_target_closed_error(exc) or page_closed or browser_connected is False:
+                # Preserve Download.save_as failure instead of masking it by
+                # calling wait_for_timeout on a closed page.
+                raise
             if attempt < 3:
                 pause_seconds = 3 * attempt
-                logging.warning('RETRY Report download attempt %s/3 failed; waiting %s second(s) and trying more slowly: %s', attempt, pause_seconds, exc)
+                logging.warning(
+                    "RETRY Report download attempt %s/3 failed; waiting %s "
+                    "second(s) and trying more slowly: %s",
+                    attempt,
+                    pause_seconds,
+                    exc,
+                )
                 report_page.wait_for_timeout(pause_seconds * 1000)
-    capture_report_diagnostics(report_page, report_name, diagnostics_dir, 'download_failed')
-    raise RuntimeError(f'Could not download {report_name} after three progressively slower attempts.') from last_error
+    capture_report_diagnostics(
+        report_page, report_name, diagnostics_dir, "download_failed"
+    )
+    raise RuntimeError(
+        f"Could not download {report_name} after three progressively slower attempts."
+    ) from last_error
 
 def google_value(value: Any) -> Any:
     if value is None:

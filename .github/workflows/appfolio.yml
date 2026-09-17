@@ -29,12 +29,13 @@ jobs:
       NYCHA_PREP_SPREADSHEET_ID: ${{ vars.NYCHA_PREP_SPREADSHEET_ID }}
       APPFOLIO_LOGIN_SPREADSHEET_ID: ${{ vars.APPFOLIO_LOGIN_SPREADSHEET_ID }}
       APPFOLIO_URL: ${{ vars.APPFOLIO_URL }}
+      LOG_SPREADSHEET_ID: ${{ vars.LOG_SPREADSHEET_ID }}
       RUN_MODE: ${{ inputs.mode }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip

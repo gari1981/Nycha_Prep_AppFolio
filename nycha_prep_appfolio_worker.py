@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import key_organizer_worker as appfolio_base
+from sheets_run_log import SheetsRunLog
 
 
 NYCHA_PREP_SPREADSHEET_ID = ""
@@ -153,11 +154,8 @@ def normalize_login_label(value: Any) -> str:
 
 def parse_appfolio_login_grid(rows: list[list[Any]]) -> tuple[str, str]:
     """Parse a small Login tab without ever logging or returning labels."""
-    username_labels = {
-        "username", "user name", "email", "email address",
-        "appfolio username", "appfolio user name", "appfolio email",
-    }
-    password_labels = {"password", "appfolio password"}
+    username_labels = {"username1"}
+    password_labels = {"password1"}
 
     # Horizontal header layout: Username | Password, with values below.
     for row_index, row in enumerate(rows[:-1]):
@@ -196,7 +194,7 @@ def parse_appfolio_login_grid(rows: list[list[Any]]) -> tuple[str, str]:
     if username and password:
         return username, password
     raise RuntimeError(
-        "Login tab must contain AppFolio username/email and password in either "
+        "Login tab must contain username1 and password1 in either "
         "a header row with values below or key/value rows."
     )
 
@@ -212,7 +210,7 @@ def load_appfolio_login(service, args: argparse.Namespace) -> None:
     args.appfolio_email, args.appfolio_password = parse_appfolio_login_grid(
         response.get("values", [])
     )
-    logging.info("SUCCESS Loaded AppFolio login from the Login tab.")
+    logging.info("SUCCESS Loaded AppFolio username1/password1 from the Login tab.")
 
 
 def normalize_header(value: Any) -> str:
@@ -388,24 +386,16 @@ def _download_all_reports_once(args: argparse.Namespace) -> dict[Any, Path]:
 
     download_dir = Path(args.download_dir).expanduser().resolve()
     diagnostics_dir = download_dir / "diagnostics"
-    profile_dir = Path(args.profile_dir).expanduser().resolve()
-    if args.browser_channel == "chromium" and not profile_dir.name.endswith(
-        "-playwright"
-    ):
-        profile_dir = profile_dir.with_name(profile_dir.name + "-playwright")
     download_dir.mkdir(parents=True, exist_ok=True)
-    profile_dir.mkdir(parents=True, exist_ok=True)
     completed: dict[Any, Path] = {}
 
-    logging.info("STARTED Launching persistent AppFolio Chrome profile.")
+    logging.info("STARTED Launching AppFolio with a fresh browser context.")
     prior_search_steps = appfolio_base.APPFOLIO_SEARCH_RETRY_STEPS
     appfolio_base.APPFOLIO_SEARCH_RETRY_STEPS = NYCHA_PREP_SEARCH_RETRY_STEPS
     try:
         with sync_playwright() as playwright:
             launch_options: dict[str, Any] = {
-                "user_data_dir": str(profile_dir),
                 "headless": args.headless,
-                "accept_downloads": True,
             }
             if args.browser_channel == "chrome":
                 launch_options["channel"] = "chrome"
@@ -415,7 +405,8 @@ def _download_all_reports_once(args: argparse.Namespace) -> dict[Any, Path]:
                 if args.browser_channel == "chromium"
                 else "system Google Chrome",
             )
-            context = playwright.chromium.launch_persistent_context(**launch_options)
+            browser = playwright.chromium.launch(**launch_options)
+            context = browser.new_context(accept_downloads=True)
             try:
                 home_page = context.pages[0] if context.pages else context.new_page()
                 appfolio_base.wait_for_appfolio_login(home_page, args)
@@ -435,8 +426,8 @@ def _download_all_reports_once(args: argparse.Namespace) -> dict[Any, Path]:
                         if report_page is not home_page and not report_page.is_closed():
                             report_page.close()
             finally:
-                context.close()
-                logging.info("SUCCESS Closed AppFolio Chrome profile.")
+                browser.close()
+                logging.info("INFO AppFolio browser cleanup completed.")
     finally:
         appfolio_base.APPFOLIO_SEARCH_RETRY_STEPS = prior_search_steps
     return completed
@@ -462,6 +453,7 @@ def download_all_reports(args: argparse.Namespace) -> dict[Any, Path]:
 
 
 def perform_refresh(service, args: argparse.Namespace) -> None:
+    args.sms_sheets_service = service
     downloads = download_all_reports(args)
     prepared = {
         job: appfolio_base.read_excel_values(path)
@@ -508,12 +500,22 @@ def main() -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    run_log = SheetsRunLog(Path(__file__).resolve().parent / "logs")
+    logging.getLogger().addHandler(run_log)
+    logging.info("STARTED NYCHA PREP AppFolio run %s", run_log.run_id)
     try:
         appfolio_base.require_dependencies()
         service = appfolio_base.build_sheets_service(args)
+        try:
+            run_log.bind(service)
+            logging.info("SUCCESS Connected to NYCHA PREP APPFOLIO progress log.")
+        except Exception as log_error:
+            logging.warning("Sheet logging unavailable (%s); local log will be retained.", type(log_error).__name__)
         validate_spreadsheet(service, args)
         load_appfolio_login(service, args)
+        run_log.secrets.extend([args.appfolio_email, args.appfolio_password])
         if args.validate_only:
+            logging.info("SUCCESS Validation completed; reports were not refreshed.")
             print(
                 "NYCHA PREP AppFolio worker dependencies, Google access, "
                 "destination tabs, Check header, and AppFolio Login values are valid."
@@ -521,14 +523,21 @@ def main() -> int:
             return 0
         if not args.run_now:
             raise RuntimeError(
-                "Refusing to run without --run-now. Pass --run-now to refresh reports."
+                "Refusing to run without --run-now. The traffic controller owns polling."
             )
         perform_refresh(service, args)
         logging.info("SUCCESS NYCHA PREP AppFolio update completed.")
         return 0
+    except KeyboardInterrupt:
+        logging.warning("STOPPED Run interrupted by the user.")
+        return 130
     except Exception as exc:
         logging.exception("ERROR NYCHA PREP AppFolio update failed: %s", exc)
         return 2
+    finally:
+        run_log.finish()
+        logging.getLogger().removeHandler(run_log)
+        run_log.close()
 
 
 if __name__ == "__main__":
